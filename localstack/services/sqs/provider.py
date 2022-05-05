@@ -736,7 +736,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
             raise QueueDoesNotExist("The specified queue does not exist for this wsdl version.")
 
         queue = backend.queues[queue_name]
-        self._assert_permission(context, queue)
 
         return GetQueueUrlResult(QueueUrl=queue.url(context))
 
@@ -775,7 +774,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         visibility_timeout: Integer,
     ) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
         queue.update_visibility_timeout(receipt_handle, visibility_timeout)
 
     def change_message_visibility_batch(
@@ -786,7 +784,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
     ) -> ChangeMessageVisibilityBatchResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
 
-        self._assert_permission(context, queue)
         self._assert_batch(entries)
 
         successful = []
@@ -819,14 +816,12 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
 
         with self._mutex:
             queue = self._resolve_queue(context, queue_url=queue_url)
-            self._assert_permission(context, queue)
             del backend.queues[queue.name]
 
     def get_queue_attributes(
         self, context: RequestContext, queue_url: String, attribute_names: AttributeNameList = None
     ) -> GetQueueAttributesResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         if not attribute_names:
             return GetQueueAttributesResult(Attributes={})
@@ -863,7 +858,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         message_group_id: String = None,
     ) -> SendMessageResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         message = self._put_message(
             queue,
@@ -887,7 +881,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         self, context: RequestContext, queue_url: String, entries: SendMessageBatchRequestEntryList
     ) -> SendMessageBatchResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         self._assert_batch(entries)
 
@@ -994,7 +987,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         receive_request_attempt_id: String = None,
     ) -> ReceiveMessageResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         num = max_number_of_messages or 1
         block = wait_time_seconds is not None
@@ -1060,7 +1052,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         self, context: RequestContext, queue_url: String, receipt_handle: String
     ) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
         queue.remove(receipt_handle)
 
     def delete_message_batch(
@@ -1070,7 +1061,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         entries: DeleteMessageBatchRequestEntryList,
     ) -> DeleteMessageBatchResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
         self._assert_batch(entries)
 
         successful = []
@@ -1098,7 +1088,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
 
     def purge_queue(self, context: RequestContext, queue_url: String) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         with self._mutex:
             # FIXME: use queue-specific locks
@@ -1157,7 +1146,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
 
     def tag_queue(self, context: RequestContext, queue_url: String, tags: TagMap) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         if not tags:
             return
@@ -1167,12 +1155,10 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
 
     def list_queue_tags(self, context: RequestContext, queue_url: String) -> ListQueueTagsResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
         return ListQueueTagsResult(Tags=queue.tags)
 
     def untag_queue(self, context: RequestContext, queue_url: String, tag_keys: TagKeyList) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         for k in tag_keys:
             if k in queue.tags:
@@ -1187,7 +1173,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         actions: ActionNameList,
     ) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         self._validate_actions(actions)
 
@@ -1197,7 +1182,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
 
     def remove_permission(self, context: RequestContext, queue_url: String, label: String) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        self._assert_permission(context, queue)
 
         candidates = [p for p in queue.permissions if p.label == label]
         if candidates:
@@ -1239,17 +1223,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
                     f"Value SQS:{action} for parameter ActionName is invalid. Reason: Please refer to the appropriate "
                     "WSDL for a list of valid actions. "
                 )
-
-    def _assert_permission(self, context: RequestContext, queue: SqsQueue):
-        action = context.operation.name
-
-        for permission in queue.permissions:
-            if permission.action == "*":
-                return
-            if permission.action == action:
-                return
-
-        raise CommonServiceException("AccessDeniedException", "Not allowed")
 
     def _assert_batch(self, batch: List):
         if not batch:
