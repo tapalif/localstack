@@ -1,6 +1,11 @@
 import json
 import re
+from collections import defaultdict
 from copy import deepcopy
+from typing import Dict, List
+
+from werkzeug.exceptions import NotFound
+from werkzeug.routing import Rule
 
 from localstack.aws.api import RequestContext, handler
 from localstack.aws.api.apigateway import (
@@ -32,8 +37,11 @@ from localstack.aws.api.apigateway import (
     VpcLink,
     VpcLinks,
 )
+from localstack.aws.protocol.op_router import RestServiceOperationRouter
 from localstack.aws.proxy import AwsApiListener
+from localstack.aws.spec import load_service
 from localstack.constants import HEADER_LOCALSTACK_EDGE_URL
+from localstack.http import Request, Response
 from localstack.services.apigateway import helpers
 from localstack.services.apigateway.context import ApiInvocationContext
 from localstack.services.apigateway.helpers import (
@@ -46,6 +54,7 @@ from localstack.services.apigateway.helpers import (
 )
 from localstack.services.apigateway.invocations import invoke_rest_api_from_request
 from localstack.services.apigateway.patches import apply_patches
+from localstack.services.edge import ROUTER
 from localstack.services.moto import call_moto
 from localstack.services.plugins import ServiceLifecycleHook
 from localstack.utils.analytics import event_publisher
@@ -110,17 +119,125 @@ class ApigatewayApiListener(AwsApiListener):
             API_REGIONS[api_id] = region
 
 
+class ApigatewayRouter:
+    def __init__(self):
+        self.op_router = RestServiceOperationRouter(load_service("apigateway"))
+        self.router_rules: Dict[str, List[Rule]] = defaultdict(list)
+
+    def add_rest_api(self, rest_api: RestApi):
+        # TODO: probably it is better to have a parameterized handler and only one rule, rather than creating a new
+        #  rule for every rest API. the more rules there are, the slower the routing will be. on the other hand,
+        #  regex matching could be just as slow. need to check!
+        self.router_rules[rest_api["id"]].append(
+            ROUTER.add(f"/restapis/{rest_api['id']}", endpoint=self.handle_restapi)
+        )
+
+        self.router_rules[rest_api["id"]].append(
+            ROUTER.add(f"/restapis/{rest_api['id']}/<path:path>", endpoint=self.handle_restapi)
+        )
+
+        self.router_rules[rest_api["id"]].append(
+            ROUTER.add(
+                "/<path:path>",
+                host=f"{rest_api['id']}.execute-api.<regex('.*'):server>",
+                endpoint=self.handle_restapi_host,
+            )
+        )
+
+        # FIXME: clean up rule
+        self.router_rules[rest_api["id"]].append(
+            ROUTER.add(
+                f"/{rest_api['id']}/resources/<regex('[A-Za-z0-9_-]+'):resource>/methods/<path:path>",
+                endpoint=self.handle_helper,
+            )
+        )
+
+    def remove_rest_api(self, rest_api_id: str):
+        rules = self.router_rules.pop(rest_api_id, [])
+        for rule in rules:
+            ROUTER.remove_rule(rule)
+
+    def handle_restapi_host(self, request: Request, path=None, server=None) -> Response:
+        return self.handle_restapi(request)
+
+    def handle_restapi(self, request: Request, path=None) -> Response:
+        # TODO: find a better way to implement precedence
+        has_api_op = False
+        try:
+            op, _ = self.op_router.match(request)
+            if op:
+                has_api_op = True
+        except NotFound:
+            pass
+
+        if has_api_op:
+            # this looks a bit unintuitive. the fact that there is an API operation for this URL means that there
+            # cannot be a user route with the same match, so we raise a NotFound error indicating that there is no
+            # user route.
+            raise NotFound()
+
+        invocation_context = self.to_invocation_context(request)
+
+        result = invoke_rest_api_from_request(invocation_context)
+        if result is not None:
+            return Response(
+                response=result.content,
+                status=result.status_code,
+                headers=dict(result.headers),
+            )
+
+        raise NotFound()
+
+    def handle_helper(self, request: Request, *args, **kwargs) -> Response:
+        # if call is from test_invoke_api then use http_method to find the integration,
+        #   as test_invoke_api makes a POST call to request the test invocation
+        invocation_context = self.to_invocation_context(request)
+        data = parse_json_or_yaml(invocation_context.data_as_string())
+        if data:
+            orig_data = data
+            path_with_query_string = orig_data.get("pathWithQueryString", None)
+            if path_with_query_string:
+                invocation_context.path_with_query_string = path_with_query_string
+            invocation_context.data = data.get("body")
+            invocation_context.headers = orig_data.get("headers", {})
+
+        result = invoke_rest_api_from_request(invocation_context)
+
+        return Response(
+            response=to_str(result.content),
+            status=result.status_code,
+            headers=dict(result.headers),
+        )
+
+    def to_invocation_context(self, request: Request) -> ApiInvocationContext:
+        # FIXME: ApiInvocationContext should be refactored to use werkzeug request object correctly
+        method = request.method
+        path = request.path
+        data = request.get_data(cache=True) or b""
+        headers = request.headers
+
+        return ApiInvocationContext(method, path, data, headers)
+
+
 class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
+
+    router: ApigatewayRouter
+
+    def __init__(self):
+        self.router = ApigatewayRouter()
+
     def on_after_init(self):
         apply_patches()
 
     @handler("CreateRestApi", expand=False)
     def create_rest_api(self, context: RequestContext, request: CreateRestApiRequest) -> RestApi:
         result = call_moto(context)
+
         event_publisher.fire_event(
             event_publisher.EVENT_APIGW_CREATE_API,
             payload={"a": event_publisher.get_hash(result["id"])},
         )
+        self.router.add_rest_api(result)
         return result
 
     def delete_rest_api(self, context: RequestContext, rest_api_id: String) -> None:
@@ -129,6 +246,7 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
             event_publisher.EVENT_APIGW_DELETE_API,
             payload={"a": event_publisher.get_hash(rest_api_id)},
         )
+        self.router.remove_rest_api(rest_api_id)
 
     # authorizers
 
