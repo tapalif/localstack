@@ -1171,7 +1171,6 @@ class TestSNSProvider:
                 QueueUrl=queue_url,
                 MessageAttributeNames=["All"],
                 MaxNumberOfMessages=10,
-                VisibilityTimeout=0,
             )
             assert len(response["Messages"]) == 4
             for message in response["Messages"]:
