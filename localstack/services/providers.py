@@ -114,9 +114,14 @@ def firehose():
 
 @aws_provider()
 def iam():
-    from localstack.services.iam import iam_listener, iam_starter
+    from localstack.services.iam.provider import IamProvider
+    from localstack.services.moto import MotoFallbackDispatcher
 
-    return Service("iam", listener=iam_listener.UPDATE_IAM, start=iam_starter.start_iam)
+    provider = IamProvider()
+    return Service(
+        "iam",
+        listener=AwsApiListener("iam", MotoFallbackDispatcher(provider)),
+    )
 
 
 @aws_provider()
@@ -270,9 +275,12 @@ def ses():
 
 @aws_provider()
 def sns():
-    from localstack.services.sns import sns_listener, sns_starter
+    from localstack.aws.proxy import AwsApiListener
+    from localstack.services.sns.provider import SnsProvider
 
-    return Service("sns", listener=sns_listener.UPDATE_SNS, start=sns_starter.start_sns)
+    provider = SnsProvider()
+
+    return Service("sns", listener=AwsApiListener("sns", provider), lifecycle_hook=provider)
 
 
 @aws_provider()
@@ -299,10 +307,13 @@ def ssm():
 
 @aws_provider()
 def events():
-    from localstack.services.events import events_listener, events_starter
+    from localstack.services.events.provider import EventsProvider
+    from localstack.services.moto import MotoFallbackDispatcher
 
+    provider = EventsProvider()
     return Service(
-        "events", listener=events_listener.UPDATE_EVENTS, start=events_starter.start_events
+        "events",
+        listener=AwsApiListener("events", MotoFallbackDispatcher(provider)),
     )
 
 

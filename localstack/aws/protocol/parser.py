@@ -87,7 +87,7 @@ from botocore.model import (
     Shape,
     StructureShape,
 )
-from werkzeug.exceptions import NotFound
+from werkzeug.exceptions import BadRequest, NotFound
 
 from localstack.aws.api import HttpRequest
 from localstack.aws.protocol.op_router import RestServiceOperationRouter
@@ -555,6 +555,7 @@ class BaseRestRequestParser(RequestParser):
 
     def __init__(self, service: ServiceModel) -> None:
         super().__init__(service)
+        self.ignore_get_body_errors = False
         self._operation_router = RestServiceOperationRouter(service)
 
     def _get_normalized_request_uri_length(self, operation_model: OperationModel) -> int:
@@ -631,7 +632,13 @@ class BaseRestRequestParser(RequestParser):
                 )
         else:
             # The payload covers the whole body. We only parse the body if it hasn't been handled by the payload logic.
-            non_payload_parsed = self._initial_body_parse(request)
+            try:
+                non_payload_parsed = self._initial_body_parse(request)
+            except ProtocolParserError:
+                # GET requests should ignore the body, so we just let them pass
+                if not (request.method in ["GET", "HEAD"] and self.ignore_get_body_errors):
+                    raise
+
         # even if the payload has been parsed, the rest of the shape needs to be processed as well
         # (for members which are located outside of the body, like uri or header)
         non_payload_parsed = self._parse_shape(request, shape, non_payload_parsed, uri_params)
@@ -666,6 +673,7 @@ class RestXMLRequestParser(BaseRestRequestParser):
 
     def __init__(self, service_model: ServiceModel):
         super(RestXMLRequestParser, self).__init__(service_model)
+        self.ignore_get_body_errors = True
         self._namespace_re = re.compile("{.*}")
 
     def _initial_body_parse(self, request: HttpRequest) -> ETree.Element:
@@ -873,7 +881,7 @@ class BaseJSONRequestParser(RequestParser, ABC):
         else:
             try:
                 return request.get_json(force=True)
-            except ValueError as e:
+            except BadRequest as e:
                 raise ProtocolParserError("HTTP body could not be parsed as JSON.") from e
 
     def _parse_boolean(
@@ -990,7 +998,7 @@ class S3RequestParser(RestXMLRequestParser):
 
     def _revert_virtual_host_style(self, request: HttpRequest):
         # extract the bucket name from the host part of the request
-        bucket_name = request.host.split(".")[0]
+        bucket_name, host = request.host.split(".", maxsplit=1)
         # split the url and put the bucket name at the front
         parts = urlsplit(request.url)
         path_parts = parts.path.split("/")
@@ -998,9 +1006,31 @@ class S3RequestParser(RestXMLRequestParser):
         path_parts = [part for part in path_parts if part]
         path = "/" + "/".join(path_parts) or "/"
         # set the path with the bucket name in the front at the request
-        # TODO directly modifying the request can cause issues with our handler chain, instead clone the HTTP request
+
+        # TODO directly modifying the request has become extremely difficult since
+        #  https://github.com/localstack/localstack/pull/5876. werkzeug requests are designed to be, for the most
+        #  part, immutable after entering the app. we need to either have a different approach to parsing virtual
+        #  host-based S3 requests, or add code to make it easy to copy requests with modified attributes.
         request.path = path
-        request.raw_path = path
+        request.headers["Host"] = host
+
+        try:
+            # delete the werkzeug request property cache that depends on path, but make sure all of them are initialized
+            # first, otherwise `del` will raise a key error
+            request.host = None  # noqa
+            request.url = None  # noqa
+            request.base_url = None  # noqa
+            request.full_path = None  # noqa
+            request.host_url = None  # noqa
+            request.root_url = None  # noqa
+            del request.host  # noqa
+            del request.url  # noqa
+            del request.base_url  # noqa
+            del request.full_path  # noqa
+            del request.host_url  # noqa
+            del request.root_url  # noqa
+        except AttributeError:
+            pass
 
 
 def create_parser(service: ServiceModel) -> RequestParser:
