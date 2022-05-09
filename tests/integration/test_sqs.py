@@ -1613,8 +1613,7 @@ class TestSqsProvider:
             assert k in keys
             assert attributes[k] == result_attributes[k]
 
-    @pytest.mark.skipif(
-        config.SERVICE_PROVIDER_CONFIG.get_provider("sqs") == "asf",
+    @pytest.mark.skip(
         reason="this behaviour needs to be re-evaluated",
     )
     def test_call_fifo_queue_url(self, sqs_client, sqs_create_queue):
