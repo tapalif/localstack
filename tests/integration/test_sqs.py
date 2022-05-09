@@ -424,10 +424,6 @@ class TestSqsProvider:
 
         monkeypatch.setattr(config, "SQS_PORT_EXTERNAL", external_port)
         monkeypatch.setattr(config, "HOSTNAME_EXTERNAL", external_host)
-        # TODO: remove once the old provider is discontinued
-        from localstack.services.sqs import sqs_listener as old_sqs_listener
-
-        monkeypatch.setattr(old_sqs_listener, "SQS_PORT_EXTERNAL", external_port)
 
         queue_name = f"queue-{short_uid()}"
         queue_url = sqs_create_queue(QueueName=queue_name)
@@ -677,10 +673,6 @@ class TestSqsProvider:
             sqs_create_queue(QueueName=queue_name, Attributes=attributes)
         e.match("InvalidParameterValue")
 
-    @pytest.mark.skipif(
-        config.SERVICE_PROVIDER_CONFIG.get_provider("sqs") != "asf",
-        reason="New provider test which isn't covered by old one",
-    )
     def test_standard_queue_cannot_have_fifo_suffix(self, sqs_create_queue):
         queue_name = f"queue-{short_uid()}.fifo"
         with pytest.raises(Exception) as e:
@@ -1600,10 +1592,6 @@ class TestSqsProvider:
             "Messages"
         )[0].get("MD5OfBody")
 
-    @pytest.mark.skipif(
-        config.SERVICE_PROVIDER_CONFIG.get_provider("sqs") != "asf",
-        reason="New provider test which isn't covered by old one",
-    )
     def test_sse_attributes_are_accepted(self, sqs_client, sqs_create_queue):
         queue_name = f"queue-{short_uid()}"
         queue_url = sqs_create_queue(QueueName=queue_name)
